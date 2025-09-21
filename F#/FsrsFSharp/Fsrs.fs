@@ -27,7 +27,7 @@ type Card = {
 }
 
 type SchedulerConfig = {
-    Parameters: float[]
+    W: float[]
     DesiredRetention: float
     LearningSteps: TimeSpan[]
     RelearningSteps: TimeSpan[]
@@ -37,7 +37,7 @@ type SchedulerConfig = {
 
 type Scheduler = private {
     Config: SchedulerConfig
-    Parameters: float[]
+    W: float[]
     Decay: float
     Factor: float
 }
@@ -54,15 +54,15 @@ module internal FsrsAlgorithm =
     let private clampDifficulty difficulty = difficulty |> max minDifficulty |> min maxDifficulty
     let private clampStability stability = max stability stabilityMin
 
-    let private rawInitialDifficulty (parameters: float[]) (rating: Rating) =
+    let private rawInitialDifficulty (w: float[]) (rating: Rating) =
         let ratingValue = rating |> Rating.toValue |> float
-        parameters.[4] - (exp (parameters.[5] * (ratingValue - 1.0))) + 1.0
+        w.[4] - (exp (w.[5] * (ratingValue - 1.0))) + 1.0
 
-    let initialStability (parameters: float[]) (rating: Rating) =
-        parameters.[(Rating.toValue rating) - 1] |> clampStability
+    let initialStability (w: float[]) (rating: Rating) =
+        w.[(Rating.toValue rating) - 1] |> clampStability
 
-    let initialDifficulty (parameters: float[]) (rating: Rating) =
-        rawInitialDifficulty parameters rating |> clampDifficulty
+    let initialDifficulty (w: float[]) (rating: Rating) =
+        rawInitialDifficulty w rating |> clampDifficulty
 
     let nextInterval (factor: float) (retention: float) (decay: float)
                      (maxInterval: int) (stability: float) =
@@ -70,73 +70,53 @@ module internal FsrsAlgorithm =
         |> round |> int |> max 1 |> min maxInterval
         |> float |> TimeSpan.FromDays
 
-    let shortTermStability (parameters: float[]) (stability: float) (rating: Rating) =
+    let shortTermStability (w: float[]) (stability: float) (rating: Rating) =
         let ratingValue = rating |> Rating.toValue |> float
         let increase =
-            exp (parameters.[17] * (ratingValue - 3.0 + parameters.[18]))
-            * (stability ** -parameters.[19])
+            exp (w.[17] * (ratingValue - 3.0 + w.[18]))
+            * (stability ** -w.[19])
         let finalIncrease = match rating with Good | Easy -> max increase 1.0 | _ -> increase
         stability * finalIncrease |> clampStability
 
-    let nextDifficulty (parameters: float[]) (difficulty: float) (rating: Rating) =
+    let nextDifficulty (w: float[]) (difficulty: float) (rating: Rating) =
         let ratingValue = rating |> Rating.toValue |> float
-        let deltaDifficulty = -(parameters.[6] * (ratingValue - 3.0))
+        let deltaDifficulty = -(w.[6] * (ratingValue - 3.0))
         let dampedDelta =
             (maxDifficulty - difficulty) * deltaDifficulty / (maxDifficulty - minDifficulty)
-        let initialEasyDifficulty = rawInitialDifficulty parameters Easy
-        parameters.[7] * initialEasyDifficulty
-        + (1.0 - parameters.[7]) * (difficulty + dampedDelta)
+        let initialEasyDifficulty = rawInitialDifficulty w Easy
+        w.[7] * initialEasyDifficulty
+        + (1.0 - w.[7]) * (difficulty + dampedDelta)
         |> clampDifficulty
 
-    let private nextForgetStability (parameters: float[]) (data: ReviewedCard)
+    let private nextForgetStability (w: float[]) (data: ReviewedCard)
                                     (retrievability: float) =
-        let p = parameters
         let longTerm =
-            p.[11] * (data.Difficulty ** -p.[12])
-            * (((data.Stability + 1.0) ** p.[13]) - 1.0)
-            * (exp ((1.0 - retrievability) * p.[14]))
-        let shortTerm = data.Stability / (exp (p.[17] * p.[18]))
+            w.[11] * (data.Difficulty ** -w.[12])
+            * (((data.Stability + 1.0) ** w.[13]) - 1.0)
+            * (exp ((1.0 - retrievability) * w.[14]))
+        let shortTerm = data.Stability / (exp (w.[17] * w.[18]))
         min longTerm shortTerm
 
-    let private nextRecallStability (parameters: float[]) (data: ReviewedCard)
+    let private nextRecallStability (w: float[]) (data: ReviewedCard)
                                     (retrievability: float) (rating: Rating) =
-        let p = parameters
-        let hardPenalty = if rating = Hard then p.[15] else 1.0
-        let easyBonus = if rating = Easy then p.[16] else 1.0
+        let hardPenalty = if rating = Hard then w.[15] else 1.0
+        let easyBonus = if rating = Easy then w.[16] else 1.0
         data.Stability
-        * (1.0 + exp p.[8] * (11.0 - data.Difficulty) * (data.Stability ** -p.[9])
-        * (exp ((1.0 - retrievability) * p.[10]) - 1.0) * hardPenalty * easyBonus)
+        * (1.0 + exp w.[8] * (11.0 - data.Difficulty) * (data.Stability ** -w.[9])
+        * (exp ((1.0 - retrievability) * w.[10]) - 1.0) * hardPenalty * easyBonus)
 
-    let nextStability (parameters: float[]) (data: ReviewedCard)
+    let nextStability (w: float[]) (data: ReviewedCard)
                       (retrievability: float) (rating: Rating) =
         match rating with
-        | Again -> nextForgetStability parameters data retrievability
-        | _ -> nextRecallStability parameters data retrievability rating
+        | Again -> nextForgetStability w data retrievability
+        | _ -> nextRecallStability w data retrievability rating
         |> clampStability
-
-    type private FuzzRange = { Start: float; End: float; Factor: float }
-    let getFuzzedInterval (rand: Random) (maxInterval: int) (interval: TimeSpan) =
-        let fuzzRanges = [
-            { Start = 2.5; End = 7.0; Factor = 0.15 }
-            { Start = 7.0; End = 20.0; Factor = 0.1 }
-            { Start = 20.0; End = Double.PositiveInfinity; Factor = 0.05 }
-        ]
-        let intervalDays = interval.TotalDays
-        if intervalDays < 2.5 then interval
-        else
-            let delta =
-                fuzzRanges
-                |> List.fold (fun acc range ->
-                    acc + range.Factor * max 0.0 (min intervalDays range.End - range.Start)) 0.0
-            let minIvl = intervalDays - delta |> round |> int |> max 2
-            let maxIvl = intervalDays + delta |> round |> int
-            rand.Next(minIvl, maxIvl + 1) |> min maxInterval |> float |> TimeSpan.FromDays
 
 module Scheduler =
     open FsrsAlgorithm
 
     let DefaultConfig = {
-        Parameters = [| 0.212; 1.2931; 2.3065; 8.2956; 6.4133; 0.8334; 3.0194; 0.001; 1.8722; 0.1666; 0.796; 1.4835; 0.0614; 0.2629; 1.6483; 0.6014; 1.8729; 0.5425; 0.0912; 0.0658; 0.1542 |]
+        W = [| 0.212; 1.2931; 2.3065; 8.2956; 6.4133; 0.8334; 3.0194; 0.001; 1.8722; 0.1666; 0.796; 1.4835; 0.0614; 0.2629; 1.6483; 0.6014; 1.8729; 0.5425; 0.0912; 0.0658; 0.1542 |]
         DesiredRetention = 0.9
         LearningSteps = [| TimeSpan.FromMinutes 1.0; TimeSpan.FromMinutes 10.0 |]
         RelearningSteps = [| TimeSpan.FromMinutes 10.0 |]
@@ -144,18 +124,18 @@ module Scheduler =
         EnableFuzzing = true
     }
 
-    let private checkAndFillParameters (parameters: float[]) =
+    let private checkAndFillParameters (w: float[]) =
         let fsrs5DefaultDecay = 0.5
         let filled =
-            match parameters.Length with
+            match w.Length with
             | 17 ->
-                let p = Array.copy parameters
-                p.[4] <- p.[5] * 2.0 + p.[4]
-                p.[5] <- log (p.[5] * 3.0 + 1.0) / 3.0
-                p.[6] <- p.[6] + 0.5
-                Array.concat [| p; [| 0.0; 0.0; 0.0; fsrs5DefaultDecay |] |]
-            | 19 -> Array.concat [| parameters; [| 0.0; fsrs5DefaultDecay |] |]
-            | 21 -> parameters
+                let wn = Array.copy w
+                wn.[4] <- wn.[5] * 2.0 + wn.[4]
+                wn.[5] <- log (wn.[5] * 3.0 + 1.0) / 3.0
+                wn.[6] <- wn.[6] + 0.5
+                Array.concat [| wn; [| 0.0; 0.0; 0.0; fsrs5DefaultDecay |] |]
+            | 19 -> Array.concat [| w; [| 0.0; fsrs5DefaultDecay |] |]
+            | 21 -> w
             | _ -> raise (ArgumentException("Invalid number of parameters. Supported: 17, 19, or 21."))
 
         if filled |> Array.exists (Double.IsFinite >> not) then
@@ -180,16 +160,16 @@ module Scheduler =
         let (stability, difficulty) =
             match card.Phase with
             | New ->
-                initialStability scheduler.Parameters rating,
-                initialDifficulty scheduler.Parameters rating
+                initialStability scheduler.W rating,
+                initialDifficulty scheduler.W rating
             | Reviewed data ->
-                let newDifficulty = nextDifficulty scheduler.Parameters data.Difficulty rating
+                let newDifficulty = nextDifficulty scheduler.W data.Difficulty rating
                 let newStability =
                     if reviewInterval.TotalDays < 1.0 then
-                        shortTermStability scheduler.Parameters data.Stability rating
+                        shortTermStability scheduler.W data.Stability rating
                     else
                         let retrievability = getCardRetrievability data
-                        nextStability scheduler.Parameters data retrievability rating
+                        nextStability scheduler.W data retrievability rating
                 (newStability, newDifficulty)
 
         let state, step = match card.Phase with | New -> Learning, 0 | Reviewed data -> data.State, data.Step
@@ -236,6 +216,24 @@ module Scheduler =
             else
                 toReviewState scheduler reviewed
 
+    type private FuzzRange = { Start: float; End: float; Factor: float }
+    let getFuzzedInterval (rand: Random) (maxInterval: int) (interval: TimeSpan) =
+        let fuzzRanges = [
+            { Start = 2.5; End = 7.0; Factor = 0.15 }
+            { Start = 7.0; End = 20.0; Factor = 0.1 }
+            { Start = 20.0; End = Double.PositiveInfinity; Factor = 0.05 }
+        ]
+        let intervalDays = interval.TotalDays
+        if intervalDays < 2.5 then interval
+        else
+            let delta =
+                fuzzRanges
+                |> List.fold (fun acc range ->
+                    acc + range.Factor * max 0.0 (min intervalDays range.End - range.Start)) 0.0
+            let minIvl = intervalDays - delta |> round |> int |> max 2
+            let maxIvl = intervalDays + delta |> round |> int
+            rand.Next(minIvl, maxIvl + 1) |> min maxInterval |> float |> TimeSpan.FromDays
+
     let private applyFuzzing (rand: Random) (scheduler: Scheduler)
                              (reviewed: ReviewedCard) (interval: TimeSpan) =
         match scheduler.Config.EnableFuzzing, reviewed.State with
@@ -252,11 +250,11 @@ module Scheduler =
         updatedCard
 
     let createScheduler (config: SchedulerConfig) : Scheduler =
-        let filledParams = checkAndFillParameters config.Parameters
+        let filledParams = checkAndFillParameters config.W
         let decay = -filledParams.[20]
         {
             Config = config
-            Parameters = filledParams
+            W = filledParams
             Decay = decay
             Factor = 0.9 ** (1.0 / decay) - 1.0
         }

@@ -10,7 +10,7 @@
 
   <ItemGroup>
     <Compile Include="MSTestSettings.fs" />
-    <Compile Include="BasicTests.fs" />
+    <Compile Include="FsrsTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

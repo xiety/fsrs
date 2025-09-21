@@ -6,7 +6,7 @@ open System
 open FsUnit.MsTest
 
 [<TestClass>]
-type BasicTests () =
+type FsrsTests () =
 
     let rand = Random()
 
@@ -71,8 +71,8 @@ type BasicTests () =
 
     [<TestMethod>]
     member _.TestMemoState() =
-        let parameters = [| 0.6845422; 1.6790825; 4.7349424; 10.042885; 7.4410233; 0.64219797; 1.071918; 0.0025195254; 1.432437; 0.1544; 0.8692766; 2.0696752; 0.0953; 0.2975; 2.4691248; 0.19542035; 3.201072; 0.18046261; 0.121442534 |]
-        let scheduler = Scheduler.create { Scheduler.DefaultConfig with Parameters = parameters } rand
+        let w = [| 0.6845422; 1.6790825; 4.7349424; 10.042885; 7.4410233; 0.64219797; 1.071918; 0.0025195254; 1.432437; 0.1544; 0.8692766; 2.0696752; 0.0953; 0.2975; 2.4691248; 0.19542035; 3.201072; 0.18046261; 0.121442534 |]
+        let scheduler = Scheduler.create { Scheduler.DefaultConfig with W = w } rand
         let reviews = [| (Rating.Again, 0); (Rating.Good, 1); (Rating.Good, 3); (Rating.Good, 8); (Rating.Good, 21) |]
 
         let finalCard1 = runReviews scheduler reviews
@@ -91,9 +91,9 @@ type BasicTests () =
         let finalCard1 = runReviews scheduler reviews
         finalCard1 |> checkStabilityAndDifficulty 53.62691 6.3574867
 
-        let parameters2 = Array.copy Scheduler.DefaultConfig.Parameters
-        for i in [17..19] do parameters2.[i] <- 0.0
-        let scheduler2 = Scheduler.create { Scheduler.DefaultConfig with Parameters = parameters2 } rand
+        let w2 = Array.copy Scheduler.DefaultConfig.W
+        for i in [17..19] do w2.[i] <- 0.0
+        let scheduler2 = Scheduler.create { Scheduler.DefaultConfig with W = w2 } rand
 
         let finalCard2 = runReviews scheduler2 reviews
         finalCard2 |> checkStabilityAndDifficulty 53.335106 6.3574867
