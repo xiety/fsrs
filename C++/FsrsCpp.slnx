@@ -1,0 +1,8 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="FsrsCpp.Tests/FsrsCpp.Tests.vcxproj" />
+  <Project Path="FsrsCpp/FsrsCpp.vcxproj" Id="4d69691c-6b77-4678-b02b-06f743847303" />
+</Solution>
