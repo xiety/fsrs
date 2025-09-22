@@ -12,8 +12,8 @@ type FsrsTests () =
 
     let getReviewedData card =
         match card.Phase with
+        | New -> failwith "Card is New and has no reviewed data."
         | Reviewed data -> data
-        | New -> failwith "Expected card to be in a Reviewed state, but it was New."
 
     let createTestCard() =
         { CardId = 1L; Interval = TimeSpan.Zero; Phase = New }
@@ -22,10 +22,10 @@ type FsrsTests () =
         Scheduler.create Scheduler.DefaultConfig rand
 
     let runReviews (scheduler: SchedulerApi) (reviews: (Rating * int)[]) =
-        let initialCard = createTestCard()
-        reviews |> Array.fold (fun card (rating, interval) ->
-            scheduler.ReviewCard card rating (TimeSpan.FromDays interval))
-            initialCard
+        let card = createTestCard()
+        reviews |> Array.fold (fun c (rating, interval) ->
+            scheduler.ReviewCard c rating (TimeSpan.FromDays interval))
+            card
 
     let checkStabilityAndDifficulty (expectedStability: float) (expectedDifficulty: float) (card: Card) =
         let data = getReviewedData card
@@ -38,24 +38,35 @@ type FsrsTests () =
             { card with
                 Interval = TimeSpan.FromDays(float interval)
                 Phase = Reviewed { reviewed with Stability = stability; Difficulty = difficulty } }
-        | _ -> failwith "Cannot modify a card that is not in the Reviewed phase."
+        | _ -> failwith "Cannot modify a New card"
 
     [<TestMethod>]
     member _.TestNextInterval() =
-        let desiredRetentions = [| 1..10 |] |> Array.map (float >> fun x -> x / 10.0)
-        let config = { Scheduler.DefaultConfig with LearningSteps = [||]; EnableFuzzing = false; MaximumInterval = Int32.MaxValue }
+        let desiredRetentions = [| 0.1 .. 0.1 .. 1.0 |]
+        let config = {
+            Scheduler.DefaultConfig with
+                LearningSteps = [||]
+                EnableFuzzing = false
+                MaximumInterval = Int32.MaxValue
+        }
 
-        let actual = desiredRetentions |> Array.map (fun r ->
-            let scheduler = Scheduler.createScheduler { config with DesiredRetention = r }
-            let interval = Scheduler.calculateNextReviewInterval scheduler 1.0
-            interval.TotalDays |> int
-        )
+        let actual =
+            desiredRetentions
+            |> Array.map (fun r ->
+                let scheduler = Scheduler.createScheduler { config with DesiredRetention = r } rand
+                let interval = Scheduler.calculateNextReviewInterval scheduler 1.0
+                interval.TotalDays |> int)
 
         actual |> should equal [| 3116769; 34793; 2508; 387; 90; 27; 9; 3; 1; 1 |]
 
     [<TestMethod>]
     member _.TestFsrs() =
-        let config = { Scheduler.DefaultConfig with LearningSteps = [||]; RelearningSteps = [||]; EnableFuzzing = false }
+        let config = {
+            Scheduler.DefaultConfig with
+                LearningSteps = [||]
+                RelearningSteps = [||]
+                EnableFuzzing = false
+        }
         let scheduler = Scheduler.create config rand
         let initialCard = createTestCard()
         let ratings = [| Rating.Again; Rating.Good; Rating.Good; Rating.Good; Rating.Good; Rating.Good |]
@@ -80,7 +91,6 @@ type FsrsTests () =
 
         let cardMod = finalCard1 |> changeCard 21 20.925528 7.005062
         let finalCard2 = scheduler.ReviewCard cardMod Rating.Good cardMod.Interval
-
         finalCard2 |> checkStabilityAndDifficulty 40.87456 6.9913807
 
     [<TestMethod>]
@@ -92,7 +102,7 @@ type FsrsTests () =
         finalCard1 |> checkStabilityAndDifficulty 53.62691 6.3574867
 
         let w2 = Array.copy Scheduler.DefaultConfig.W
-        for i in [17..19] do w2.[i] <- 0.0
+        for i in 17..19 do w2.[i] <- 0.0
         let scheduler2 = Scheduler.create { Scheduler.DefaultConfig with W = w2 } rand
 
         let finalCard2 = runReviews scheduler2 reviews
@@ -118,6 +128,7 @@ type FsrsTests () =
     member _.TestAgainLearningSteps() =
         let scheduler = createDefaultScheduler()
         let card = createTestCard()
+
         let cardAfterAgain = scheduler.ReviewCard card Rating.Again card.Interval
         let data = getReviewedData cardAfterAgain
         data.State |> should equal Learning
@@ -129,16 +140,17 @@ type FsrsTests () =
         let config = { Scheduler.DefaultConfig with LearningSteps = [| TimeSpan.FromMinutes 10.0 |] }
         let scheduler = Scheduler.create config rand
         let card = createTestCard()
-        let cardAfterHard = scheduler.ReviewCard card Rating.Hard card.Interval
 
+        let updatedCard = scheduler.ReviewCard card Rating.Hard card.Interval
         let expectedInterval = TimeSpan.FromMinutes(10.0 * 1.5)
-        (abs (cardAfterHard.Interval - expectedInterval).TotalSeconds) |> should be (lessThanOrEqualTo 1.0)
+        (abs (updatedCard.Interval - expectedInterval).TotalSeconds) |> should be (lessThanOrEqualTo 1.0)
 
     [<TestMethod>]
     member _.TestNoLearningSteps() =
         let config = { Scheduler.DefaultConfig with LearningSteps = Array.empty }
         let scheduler = Scheduler.create config rand
         let card = createTestCard()
+
         let updatedCard = scheduler.ReviewCard card Rating.Again card.Interval
         let updatedData = getReviewedData updatedCard
         updatedData.State |> should equal Review
@@ -152,8 +164,8 @@ type FsrsTests () =
 
         let finalCard =
             Seq.init 10 (fun _ -> ())
-            |> Seq.fold (fun currentCard _ ->
-                scheduler.ReviewCard currentCard Rating.Easy currentCard.Interval) card
+            |> Seq.fold (fun c _ -> scheduler.ReviewCard c Rating.Easy c.Interval)
+               card
 
         finalCard.Interval.Days |> should be (lessThanOrEqualTo config.MaximumInterval)
 
@@ -164,10 +176,11 @@ type FsrsTests () =
         let card = createTestCard()
 
         Seq.init 100 (fun _ -> ())
-        |> Seq.fold (fun currentCard _ ->
-            let nextReviewTime = currentCard.Interval.Add(TimeSpan.FromDays 1.0)
-            let updatedCard = scheduler.ReviewCard currentCard Rating.Again nextReviewTime
-            let updatedData = getReviewedData updatedCard
-            updatedData.Stability |> should be (greaterThanOrEqualTo stabilityMin)
-            updatedCard) card
+        |> Seq.fold (fun c _ ->
+            let nextReviewTime = c.Interval.Add(TimeSpan.FromDays 1.0)
+            let updatedCard = scheduler.ReviewCard c Rating.Again nextReviewTime
+            let data = getReviewedData updatedCard
+            data.Stability |> should be (greaterThanOrEqualTo stabilityMin)
+            updatedCard)
+           card
         |> ignore

@@ -40,10 +40,11 @@ type Scheduler = private {
     W: float[]
     Decay: float
     Factor: float
+    Rand: Random
 }
 
 type SchedulerApi = {
-    ReviewCard : Card -> Rating -> TimeSpan -> Card
+    ReviewCard: Card -> Rating -> TimeSpan -> Card
 }
 
 module internal FsrsAlgorithm =
@@ -51,8 +52,8 @@ module internal FsrsAlgorithm =
     let private maxDifficulty = 10.0
     let private stabilityMin = 0.001
 
-    let private clampDifficulty difficulty = difficulty |> max minDifficulty |> min maxDifficulty
-    let private clampStability stability = max stability stabilityMin
+    let private clampDifficulty = max minDifficulty >> min maxDifficulty
+    let private clampStability = max stabilityMin
 
     let private rawInitialDifficulty (w: float[]) (rating: Rating) =
         let ratingValue = rating |> Rating.toValue |> float
@@ -81,8 +82,7 @@ module internal FsrsAlgorithm =
     let nextDifficulty (w: float[]) (difficulty: float) (rating: Rating) =
         let ratingValue = rating |> Rating.toValue |> float
         let deltaDifficulty = -(w.[6] * (ratingValue - 3.0))
-        let dampedDelta =
-            (maxDifficulty - difficulty) * deltaDifficulty / (maxDifficulty - minDifficulty)
+        let dampedDelta = (maxDifficulty - difficulty) * deltaDifficulty / (maxDifficulty - minDifficulty)
         let initialEasyDifficulty = rawInitialDifficulty w Easy
         w.[7] * initialEasyDifficulty
         + (1.0 - w.[7]) * (difficulty + dampedDelta)
@@ -99,8 +99,8 @@ module internal FsrsAlgorithm =
 
     let private nextRecallStability (w: float[]) (data: ReviewedCard)
                                     (retrievability: float) (rating: Rating) =
-        let hardPenalty = if rating = Hard then w.[15] else 1.0
-        let easyBonus = if rating = Easy then w.[16] else 1.0
+        let hardPenalty = match rating with Hard -> w.[15] | _ -> 1.0
+        let easyBonus = match rating with Easy -> w.[16] | _ -> 1.0
         data.Stability
         * (1.0 + exp w.[8] * (11.0 - data.Difficulty) * (data.Stability ** -w.[9])
         * (exp ((1.0 - retrievability) * w.[10]) - 1.0) * hardPenalty * easyBonus)
@@ -112,6 +112,7 @@ module internal FsrsAlgorithm =
         | _ -> nextRecallStability w data retrievability rating
         |> clampStability
 
+[<RequireQualifiedAccess>]
 module Scheduler =
     open FsrsAlgorithm
 
@@ -136,11 +137,9 @@ module Scheduler =
                 Array.concat [| wn; [| 0.0; 0.0; 0.0; fsrs5DefaultDecay |] |]
             | 19 -> Array.concat [| w; [| 0.0; fsrs5DefaultDecay |] |]
             | 21 -> w
-            | _ -> raise (ArgumentException("Invalid number of parameters. Supported: 17, 19, or 21."))
-
+            | _ -> invalidArg "w" "Invalid number of parameters. Supported: 17, 19, or 21."
         if filled |> Array.exists (Double.IsFinite >> not) then
-            raise (ArgumentException("Invalid parameters: contains non-finite values."))
-
+            invalidArg "w" "Invalid parameters: contains non-finite values."
         filled
 
     let internal calculateNextReviewInterval (scheduler: Scheduler) (stability: float) =
@@ -165,9 +164,10 @@ module Scheduler =
             | Reviewed data ->
                 let newDifficulty = nextDifficulty scheduler.W data.Difficulty rating
                 let newStability =
-                    if reviewInterval.TotalDays < 1.0 then
+                    match reviewInterval.TotalDays with
+                    | days when days < 1.0 ->
                         shortTermStability scheduler.W data.Stability rating
-                    else
+                    | _ ->
                         let retrievability = getCardRetrievability data
                         nextStability scheduler.W data retrievability rating
                 (newStability, newDifficulty)
@@ -187,9 +187,9 @@ module Scheduler =
 
     let private handleSteps (scheduler: Scheduler) (reviewed: ReviewedCard)
                             (rating: Rating) (steps: TimeSpan[]) =
-        if Array.isEmpty steps then
-            toReviewState scheduler reviewed
-        else
+        match steps with
+        | [||] -> toReviewState scheduler reviewed
+        | _ ->
             match rating with
             | Again -> { reviewed with State = Learning; Step = 0 }, steps.[0]
             | Hard ->
@@ -211,45 +211,49 @@ module Scheduler =
         | Learning -> doHandleSteps scheduler.Config.LearningSteps
         | Relearning -> doHandleSteps scheduler.Config.RelearningSteps
         | Review ->
-            if rating = Again && not (Array.isEmpty scheduler.Config.RelearningSteps) then
+            match rating with
+            | Again when not (Array.isEmpty scheduler.Config.RelearningSteps) ->
                 { reviewed with State = Relearning; Step = 0 }, scheduler.Config.RelearningSteps.[0]
-            else
-                toReviewState scheduler reviewed
+            | _ -> toReviewState scheduler reviewed
 
     type private FuzzRange = { Start: float; End: float; Factor: float }
-    let getFuzzedInterval (rand: Random) (maxInterval: int) (interval: TimeSpan) =
+
+    let private getFuzzedInterval (rand: Random) (maxInterval: int) (interval: TimeSpan) =
         let fuzzRanges = [
             { Start = 2.5; End = 7.0; Factor = 0.15 }
             { Start = 7.0; End = 20.0; Factor = 0.1 }
             { Start = 20.0; End = Double.PositiveInfinity; Factor = 0.05 }
         ]
         let intervalDays = interval.TotalDays
-        if intervalDays < 2.5 then interval
-        else
+        match intervalDays with
+        | days when days < 2.5 -> interval
+        | _ ->
             let delta =
                 fuzzRanges
-                |> List.fold (fun acc range ->
-                    acc + range.Factor * max 0.0 (min intervalDays range.End - range.Start)) 0.0
+                |> List.sumBy (fun range ->
+                    range.Factor * max 0.0 (min intervalDays range.End - range.Start))
             let minIvl = intervalDays - delta |> round |> int |> max 2
             let maxIvl = intervalDays + delta |> round |> int
-            rand.Next(minIvl, maxIvl + 1) |> min maxInterval |> float |> TimeSpan.FromDays
+            rand.Next(minIvl, maxIvl + 1)
+            |> min maxInterval
+            |> float
+            |> TimeSpan.FromDays
 
-    let private applyFuzzing (rand: Random) (scheduler: Scheduler)
+    let private applyFuzzing (scheduler: Scheduler)
                              (reviewed: ReviewedCard) (interval: TimeSpan) =
         match scheduler.Config.EnableFuzzing, reviewed.State with
-        | true, Review -> getFuzzedInterval rand scheduler.Config.MaximumInterval interval
+        | true, Review -> getFuzzedInterval scheduler.Rand scheduler.Config.MaximumInterval interval
         | _ -> interval
 
-    let reviewCard (scheduler: Scheduler) (rand: Random) (card: Card)
-                   (rating: Rating) (reviewInterval: TimeSpan) =
+    let private reviewCard (scheduler: Scheduler) (card: Card)
+                           (rating: Rating) (reviewInterval: TimeSpan) =
         let nextReviewedState = calculateNextReviewedState scheduler card rating reviewInterval
         let (finalReviewedState, baseInterval) =
             determineNextPhaseAndInterval scheduler nextReviewedState rating
-        let finalInterval = applyFuzzing rand scheduler finalReviewedState baseInterval
-        let updatedCard = { card with Interval = finalInterval; Phase = Reviewed finalReviewedState }
-        updatedCard
+        let finalInterval = applyFuzzing scheduler finalReviewedState baseInterval
+        { card with Interval = finalInterval; Phase = Reviewed finalReviewedState }
 
-    let createScheduler (config: SchedulerConfig) : Scheduler =
+    let internal createScheduler (config: SchedulerConfig) (rand: Random) =
         let filledParams = checkAndFillParameters config.W
         let decay = -filledParams.[20]
         {
@@ -257,10 +261,11 @@ module Scheduler =
             W = filledParams
             Decay = decay
             Factor = 0.9 ** (1.0 / decay) - 1.0
+            Rand = rand
         }
 
     let create (config: SchedulerConfig) (rand: Random) : SchedulerApi =
-        let scheduler = createScheduler config
+        let scheduler = createScheduler config rand
         {
-            ReviewCard = reviewCard scheduler rand
+            ReviewCard = reviewCard scheduler
         }
